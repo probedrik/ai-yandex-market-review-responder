@@ -41,9 +41,12 @@ llm:
   timeout: 30
 yandex_market:
   base_url: https://api.partner.market.yandex.ru
-  business_id: 0
+  # business_id задаётся через env YANDEX_MARKET__BUSINESS_ID
+  business_id: 169139070
   batch_size: 25
   check_every_minutes: 30
   request_timeout: 30
   reviews_max_age_days: 90
+  # Максимум страниц за один запуск (25 отзывов на страницу)
+  # При 2475 неотвеченных отзывах потребуется ~10 запусков для полной обработки
   max_pages: 10
