@@ -46,7 +46,7 @@ yandex_market:
   batch_size: 25
   check_every_minutes: 30
   request_timeout: 30
-  reviews_max_age_days: 90
+  reviews_max_age_days: 60
   # Максимум страниц за один запуск (25 отзывов на страницу)
   # При 2475 неотвеченных отзывах потребуется ~10 запусков для полной обработки
   max_pages: 10
