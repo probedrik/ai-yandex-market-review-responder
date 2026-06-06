@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, List
 
@@ -14,41 +15,22 @@ from src.infra.config.settings import Settings
 class YandexMarketReview(BaseModel):
     """Customer review data from Yandex Market."""
 
-    model_config = ConfigDict(frozen=True, populate_by_name=True)
+    model_config = ConfigDict(frozen=True)
 
-    _SOURCE_PAYLOAD_INCLUDE = {
-        "feedback_id",
-        "author",
-        "description",
-        "statistics",
-        "identifiers",
-        "media",
-        "created_at",
-        "need_reaction",
-    }
-
-    feedback_id: int = Field(alias="feedbackId")
+    feedback_id: int
     author: str | None = None
-    created_at: datetime | None = Field(default=None, alias="createdAt")
-    need_reaction: bool | None = Field(default=None, alias="needReaction")
-
-    # Description
-    comment: str | None = Field(default=None, alias="description.comment")
-    advantages: str | None = Field(default=None, alias="description.advantages")
-    disadvantages: str | None = Field(default=None, alias="description.disadvantages")
-
-    # Statistics
-    rating: int | None = Field(default=None, alias="statistics.rating")
-    recommended: bool | None = Field(default=None, alias="statistics.recommended")
-    comments_count: int | None = Field(default=None, alias="statistics.commentsCount")
-
-    # Identifiers
-    offer_id: str | None = Field(default=None, alias="identifiers.offerId")
-    order_id: int | None = Field(default=None, alias="identifiers.orderId")
-
-    # Media
-    photos: List[str] | None = Field(default=None, alias="media.photos")
-    videos: List[str] | None = Field(default=None, alias="media.videos")
+    created_at: datetime | None = None
+    need_reaction: bool | None = None
+    comment: str | None = None
+    advantages: str | None = None
+    disadvantages: str | None = None
+    rating: int | None = None
+    recommended: bool | None = None
+    comments_count: int | None = 0
+    offer_id: str | None = None
+    order_id: int | None = None
+    photos: List[str] | None = None
+    videos: List[str] | None = None
 
     @property
     def summary(self) -> str:
@@ -93,33 +75,27 @@ class YandexMarketReview(BaseModel):
 
 def _parse_review(raw: dict[str, Any]) -> YandexMarketReview:
     """Parse a raw API feedback dict into a YandexMarketReview."""
-    # Flatten nested structure for pydantic
-    flat: dict[str, Any] = {
-        "feedbackId": raw.get("feedbackId"),
-        "author": raw.get("author"),
-        "createdAt": raw.get("createdAt"),
-        "needReaction": raw.get("needReaction"),
-    }
-
     desc = raw.get("description") or {}
-    flat["description.comment"] = desc.get("comment")
-    flat["description.advantages"] = desc.get("advantages")
-    flat["description.disadvantages"] = desc.get("disadvantages")
-
     stats = raw.get("statistics") or {}
-    flat["statistics.rating"] = stats.get("rating")
-    flat["statistics.recommended"] = stats.get("recommended")
-    flat["statistics.commentsCount"] = stats.get("commentsCount")
-
     ids = raw.get("identifiers") or {}
-    flat["identifiers.offerId"] = ids.get("offerId")
-    flat["identifiers.orderId"] = ids.get("orderId")
-
     media = raw.get("media") or {}
-    flat["media.photos"] = media.get("photos")
-    flat["media.videos"] = media.get("videos")
 
-    return YandexMarketReview(**flat)
+    return YandexMarketReview(
+        feedback_id=raw.get("feedbackId", 0),
+        author=raw.get("author"),
+        created_at=raw.get("createdAt"),
+        need_reaction=raw.get("needReaction"),
+        comment=desc.get("comment"),
+        advantages=desc.get("advantages"),
+        disadvantages=desc.get("disadvantages"),
+        rating=stats.get("rating"),
+        recommended=stats.get("recommended"),
+        comments_count=stats.get("commentsCount", 0),
+        offer_id=ids.get("offerId"),
+        order_id=ids.get("orderId"),
+        photos=media.get("photos"),
+        videos=media.get("videos"),
+    )
 
 
 class YandexMarketClient:
@@ -137,10 +113,24 @@ class YandexMarketClient:
         }
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """POST with retry and rate limiting."""
+        from requests.exceptions import RequestException
+
         url = f"{self._base_url}{path}"
-        response = requests.post(url, headers=self._headers, json=body, timeout=self.timeout)
-        response.raise_for_status()
-        return response.json()
+        max_attempts = 3
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = requests.post(url, headers=self._headers, json=body, timeout=self.timeout)
+                response.raise_for_status()
+                return response.json()
+            except RequestException as exc:
+                last_exc = exc
+                if attempt < max_attempts:
+                    wait = 2 ** attempt
+                    print(f"  [YM] attempt {attempt}/{max_attempts} failed ({type(exc).__name__}), retrying in {wait}s…")
+                    time.sleep(wait)
+        raise last_exc  # type: ignore[misc]
 
     def fetch_reviews(self) -> List[Review]:
         """Fetch unanswered reviews from Yandex Market."""
@@ -148,9 +138,16 @@ class YandexMarketClient:
         cutoff = datetime.now(timezone.utc) - timedelta(days=max_age)
 
         all_reviews: List[Review] = []
+        seen_ids: set[str] = set()
         page_token: str | None = None
+        page = 0
+        max_pages = self._config.max_pages
 
         while True:
+            page += 1
+            if page > max_pages:
+                print(f"  [YM] reached max_pages limit ({max_pages}), stopping pagination")
+                break
             body: dict[str, Any] = {
                 "limit": self.batch_size,
                 "reactionStatus": "NEED_REACTION",
@@ -177,6 +174,12 @@ class YandexMarketClient:
                     print(f"  [YM parse] skipping malformed review: {e}")
                     continue
 
+                # Dedup (API may return overlapping pages)
+                review_id = str(ym_review.feedback_id)
+                if review_id in seen_ids:
+                    continue
+                seen_ids.add(review_id)
+
                 # Filter by age
                 if ym_review.created_at and ym_review.created_at < cutoff:
                     continue
@@ -191,13 +194,13 @@ class YandexMarketClient:
             if not page_token or not feedbacks:
                 break
 
+            # Rate limiting: small delay between pages to avoid hitting API limits
+            time.sleep(0.5)
+
         return all_reviews
 
     def publish_reply(self, review_id: str, message: str) -> None:
         """Publish a reply to a review on Yandex Market."""
-        import time
-        from requests.exceptions import RequestException
-
         body = {
             "feedbackId": int(review_id),
             "comment": {
@@ -205,21 +208,11 @@ class YandexMarketClient:
             },
         }
 
-        max_attempts = 3
-        for attempt in range(1, max_attempts + 1):
-            try:
-                data = self._post(
-                    f"/v2/businesses/{self._config.business_id}/goods-feedback/comments/update",
-                    body,
-                )
-                status = data.get("status")
-                if status == "ERROR":
-                    error = data.get("error", {})
-                    raise RuntimeError(f"Yandex Market API error: {error.get('code')} — {error.get('message')}")
-                return
-            except RequestException as exc:
-                if attempt == max_attempts:
-                    raise
-                wait = 2 ** attempt
-                print(f"  [YM publish] attempt {attempt}/{max_attempts} failed ({exc}), retrying in {wait}s…")
-                time.sleep(wait)
+        data = self._post(
+            f"/v2/businesses/{self._config.business_id}/goods-feedback/comments/update",
+            body,
+        )
+        status = data.get("status")
+        if status == "ERROR":
+            error = data.get("error", {})
+            raise RuntimeError(f"Yandex Market API error: {error.get('code')} — {error.get('message')}")

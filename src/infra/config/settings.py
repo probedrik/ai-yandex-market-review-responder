@@ -9,10 +9,11 @@ class YandexMarketSettings(BaseModel):
     api_token: str = ""
     base_url: str = "https://api.partner.market.yandex.ru"
     business_id: int = 0
-    request_timeout: int = 10
+    request_timeout: int = 30
     batch_size: int = 25
     check_every_minutes: int = 30
     reviews_max_age_days: int = 90
+    max_pages: int = 10
 
 
 class LLMRuntimeSettings(BaseModel):

@@ -44,5 +44,6 @@ yandex_market:
   business_id: 0
   batch_size: 25
   check_every_minutes: 30
-  request_timeout: 10
+  request_timeout: 30
   reviews_max_age_days: 90
+  max_pages: 10
